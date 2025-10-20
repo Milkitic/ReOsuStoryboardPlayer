@@ -1,189 +1,220 @@
-﻿using ReOsuStoryboardPlayer.Core.Base;
+﻿using System;
+using System.Collections.Generic;
+using ReOsuStoryboardPlayer.Core.Base;
 using ReOsuStoryboardPlayer.Core.Commands.Group.Trigger;
 using ReOsuStoryboardPlayer.Core.Utils;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 
-namespace ReOsuStoryboardPlayer.Core.Kernel
+namespace ReOsuStoryboardPlayer.Core.Kernel;
+
+public class StoryboardUpdater : IStoryboardUpdater
 {
-    /// <summary>
-    /// SB更新物件的核心，通过Update()来更新物件
-    /// </summary>
-    public class StoryboardUpdater
+    private static readonly IComparer<StoryboardObject> ZComparer = new ZAxisComparer();
+
+    private static readonly Comparison<StoryboardObject> FrameTimeComparison =
+        (a, b) => a.FrameStartTime.CompareTo(b.FrameStartTime);
+
+    private readonly HashSet<StoryboardObject> _needResortObjects = [];
+    private readonly object _resortLock = new();
+    private readonly HashSet<StoryboardObject> _resortSetPool = [];
+    private readonly List<StoryboardObject> _toRemovePool = [];
+
+    private int _currentIndex = 0;
+    private float _prevTime = float.MinValue;
+    private List<StoryboardObject> _tempListPool = [];
+
+    public StoryboardUpdater(List<StoryboardObject> objects)
     {
-        /// <summary>
-        /// 已加载的物件集合,会按照FrameStartTime从小到大排列
-        /// </summary>
-        public List<StoryboardObject> StoryboardObjectList { get; private set; }
+        var backgroundObj = objects.Find(c => c is StoryboardBackgroundObject);
 
-        private int current_index = 0;
-
-        private ConcurrentBag<StoryboardObject> need_resort_objects = new ConcurrentBag<StoryboardObject>();
-
-        /// <summary>
-        /// 正在执行的物件集合,会按照渲染顺序Z排列
-        /// </summary>
-        public List<StoryboardObject> UpdatingStoryboardObjects { get; private set; }
-
-        public StoryboardUpdater(List<StoryboardObject> objects)
+        if (backgroundObj != null && objects.Exists(c =>
+                c.ImageFilePath == backgroundObj.ImageFilePath && c is not StoryboardBackgroundObject))
         {
-            StoryboardObjectList=new List<StoryboardObject>();
+            Log.User("Found another same background image object and delete all background objects.");
+            objects.RemoveAll(x => x is StoryboardBackgroundObject);
+        }
+        else if (backgroundObj != null)
+        {
+            backgroundObj.Z = -1;
+        }
 
-            //delete Background object if there is a normal Storyboard object which is same image file.
-            var background_obj = objects.Where(c => c is StoryboardBackgroundObject).FirstOrDefault();
-            if (objects.Any(c => c.ImageFilePath==background_obj?.ImageFilePath&&(!(c is StoryboardBackgroundObject))))
+        objects.Sort(FrameTimeComparison);
+        StoryboardObjectList = objects;
+
+        var limitUpdateCount = StoryboardObjectList.CalculateMaxUpdatingObjectsCount();
+        UpdatingStoryboardObjects = new List<StoryboardObject>(limitUpdateCount);
+
+        Flush();
+    }
+
+    public List<StoryboardObject> StoryboardObjectList { get; private set; }
+    public List<StoryboardObject> UpdatingStoryboardObjects { get; private set; }
+
+    private void Flush()
+    {
+        UpdatingStoryboardObjects.Clear();
+        _currentIndex = 0;
+        TriggerListener.DefaultListener.Reset();
+    }
+
+    private void Scan(float currentTime)
+    {
+        ProcessResortList(currentTime);
+
+        while (_currentIndex < StoryboardObjectList.Count)
+        {
+            var obj = StoryboardObjectList[_currentIndex];
+
+            if (obj.FrameStartTime > currentTime)
+                break;
+
+            if (currentTime <= obj.FrameEndTime)
             {
-                Log.User($"Found another same background image object and delete all background objects.");
-                objects.RemoveAll(x => x is StoryboardBackgroundObject);
+                AddToUpdating(obj);
+            }
+
+            _currentIndex++;
+        }
+    }
+
+    /// <summary>
+    /// 零分配版本的重排处理
+    /// </summary>
+    private void ProcessResortList(float currentTime)
+    {
+        lock (_resortLock)
+        {
+            if (_needResortObjects.Count == 0)
+                return;
+
+            // 🔥 复用 HashSet，避免 new
+            _resortSetPool.Clear();
+            foreach (var obj in _needResortObjects)
+                _resortSetPool.Add(obj);
+
+            for (int i = UpdatingStoryboardObjects.Count - 1; i >= 0; i--)
+            {
+                if (_resortSetPool.Contains(UpdatingStoryboardObjects[i]))
+                {
+                    UpdatingStoryboardObjects[i].CurrentUpdater = null;
+                    UpdatingStoryboardObjects.RemoveAt(i);
+                }
+            }
+
+            _tempListPool.Clear();
+            _tempListPool.Capacity = StoryboardObjectList.Count; // 预留容量
+
+            // 将不需要重排的对象加入
+            foreach (var obj in StoryboardObjectList)
+            {
+                if (!_resortSetPool.Contains(obj))
+                {
+                    _tempListPool.Add(obj);
+                }
+            }
+
+            // 加入需要重排的对象
+            foreach (var obj in _needResortObjects)
+            {
+                _tempListPool.Add(obj);
+            }
+
+            // 排序
+            _tempListPool.Sort(FrameTimeComparison);
+            (StoryboardObjectList, _tempListPool) = (_tempListPool, StoryboardObjectList);
+
+            RecalculateCurrentIndex(currentTime);
+
+            // 重新加入需要更新的对象
+            foreach (var obj in _needResortObjects)
+            {
+                if (obj.FrameStartTime <= currentTime && currentTime <= obj.FrameEndTime)
+                {
+                    AddToUpdating(obj);
+                }
+            }
+
+            _needResortObjects.Clear();
+        }
+    }
+
+    private void RecalculateCurrentIndex(float currentTime)
+    {
+        int low = 0, high = StoryboardObjectList.Count - 1;
+        int resultIndex = StoryboardObjectList.Count;
+
+        while (low <= high)
+        {
+            int mid = low + (high - low) / 2;
+            if (StoryboardObjectList[mid].FrameStartTime >= currentTime)
+            {
+                resultIndex = mid;
+                high = mid - 1; // 继续向左找，寻找最早的匹配项
             }
             else
             {
-                if (background_obj!=null)
-                    background_obj.Z=-1;
+                low = mid + 1;
             }
+        }
 
-            objects.Sort((a, b) =>
-            {
-                return a.FrameStartTime-b.FrameStartTime;
-            });
+        _currentIndex = resultIndex;
+    }
 
-            StoryboardObjectList=objects;
+    private void AddToUpdating(StoryboardObject obj)
+    {
+        obj.ResetTransform();
+        obj.CurrentUpdater = this;
 
-            var limit_update_count = StoryboardObjectList.CalculateMaxUpdatingObjectsCount();
+        int insertPos = UpdatingStoryboardObjects.BinarySearch(obj, ZComparer);
+        if (insertPos < 0) insertPos = ~insertPos;
+        UpdatingStoryboardObjects.Insert(insertPos, obj);
+    }
 
-            UpdatingStoryboardObjects=new List<StoryboardObject>(limit_update_count);
-
+    public void Update(float currentTime)
+    {
+        if (currentTime < _prevTime)
+        {
             Flush();
         }
-
-        /// <summary>
-        /// 重置物件的时间轴状态
-        /// </summary>
-        private void Flush()
+        else
         {
-            UpdatingStoryboardObjects.Clear();
-
-            current_index=0;
-
-            //重置触发器状态
-            TriggerListener.DefaultListener.Reset();
-        }
-
-        private bool Scan(float current_time)
-        {
-            bool add = false;
-
-            foreach (var obj in need_resort_objects)
-                StoryboardObjectList.Remove(obj);
-
-            while (need_resort_objects.TryTake(out var obj))
+            for (int i = UpdatingStoryboardObjects.Count - 1; i >= 0; i--)
             {
-                var i = BinarySearchInsertableIndex(obj.FrameStartTime);
-                StoryboardObjectList.Insert(i, obj);
-
-                if (obj.FrameStartTime<=current_index)
-                    TryAdd(obj);
-
-                //Log.Debug($"Object ({obj}) FrameTime had been changed({obj.FrameStartTime} - {obj.FrameEndTime})");
-            }
-
-            while (current_index<StoryboardObjectList.Count)
-            {
-                var obj = StoryboardObjectList[current_index];
-
-                if (obj.FrameStartTime>current_time)
-                    break;
-
-                TryAdd(obj);
-
-                current_index++;
-            }
-
-            return add;
-
-            void TryAdd(StoryboardObject obj)
-            {
-                if (current_time>obj.FrameEndTime)
-                    return;
-
-                obj.ResetTransform();
-                obj.CurrentUpdater=this;
-                UpdatingStoryboardObjects.Add(obj);
-                add=true;
-            }
-
-            int BinarySearchInsertableIndex(float time)
-            {
-                int min = 0, max = StoryboardObjectList.Count-2;
-
-                int insert = 0;
-
-                //fast check for appending
-                if (time>=StoryboardObjectList.LastOrDefault()?.FrameStartTime)
-                    insert=StoryboardObjectList.Count;
-                else
+                var obj = UpdatingStoryboardObjects[i];
+                if (currentTime > obj.FrameEndTime || currentTime < obj.FrameStartTime)
                 {
-                    while (min<=max)
-                    {
-                        int i = (max+min)/2;
-
-                        var cmd = StoryboardObjectList[i];
-                        var next_cmd = StoryboardObjectList[i+1];
-
-                        if (cmd.FrameStartTime<=time&&time<=next_cmd.FrameStartTime)
-                            return i+1;
-
-                        if (cmd.FrameStartTime>=time)
-                            max=i-1;
-                        else
-                            min=i+1;
-                    }
+                    obj.CurrentUpdater = null;
+                    UpdatingStoryboardObjects.RemoveAt(i);
                 }
-
-                return insert;
             }
         }
 
-        private float prev_time = int.MinValue;
+        _prevTime = currentTime;
 
-        /// <summary>
-        /// 更新物件
-        /// </summary>
-        /// <param name="current_time"></param>
-        public void Update(float current_time)
+        Scan(currentTime);
+
+        var needParallel = UpdatingStoryboardObjects.Count >= Setting.ParallelUpdateObjectsLimitCount
+                           && Setting.ParallelUpdateObjectsLimitCount != 0;
+
+        ParallelableForeachExecutor.Foreach(needParallel, UpdatingStoryboardObjects,
+            obj => obj.Update(currentTime));
+    }
+
+    public void AddNeedResortObject(StoryboardObject obj)
+    {
+        lock (_resortLock)
         {
-            if (current_time<prev_time)
-                Flush();
-            else
-                UpdatingStoryboardObjects.RemoveAll((obj) => (current_time>obj.FrameEndTime||current_time<obj.FrameStartTime)
-                &&(obj.CurrentUpdater=null)==null/*clean CurrentUpdater*/);
-
-            prev_time=current_time;
-
-            bool hasAdded = Scan(current_time);
-
-            if (hasAdded)
-            {
-                UpdatingStoryboardObjects.Sort((a, b) =>
-                {
-                    return a.Z-b.Z;
-                });
-            }
-
-            var need_parallel = UpdatingStoryboardObjects.Count>=Setting.ParallelUpdateObjectsLimitCount&&Setting.ParallelUpdateObjectsLimitCount!=0;
-            ParallelableForeachExecutor.Foreach(need_parallel, UpdatingStoryboardObjects, obj => obj.Update(current_time));
+            _needResortObjects.Add(obj);
         }
+    }
 
-        internal void AddNeedResortObject(StoryboardObject obj)
+    private class ZAxisComparer : IComparer<StoryboardObject>
+    {
+        public int Compare(StoryboardObject x, StoryboardObject y)
         {
+            if (x == null && y == null) return 0;
+            if (x == null) return -1;
+            if (y == null) return 1;
+            return x.Z.CompareTo(y.Z);
         }
-
-        ~StoryboardUpdater()
-        {
-        }
-
-        //public override string ToString() => $"{Info.folder_path}";
     }
 }
