@@ -14,7 +14,6 @@ using ReOsuStoryboardPlayer.Core.Parser.Stream;
 
 namespace ReOsuStoryboardPlayer.Core.Benchmark
 {
-    [SimpleJob(RuntimeMoniker.Net472)]
     public class ParserBenchmark
     {
         public static byte[][] fileStreams;

@@ -1,5 +1,6 @@
-﻿using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Running;
 using System;
+using System.Reflection;
 
 namespace ReOsuStoryboardPlayer.Core.Benchmark
 {
@@ -7,7 +8,7 @@ namespace ReOsuStoryboardPlayer.Core.Benchmark
     {
         static void Main(string[] args)
         {
-            var summary = BenchmarkRunner.Run<ParserBenchmark>();
+            var summary = BenchmarkSwitcher.FromAssembly(Assembly.GetExecutingAssembly()).Run();
             //var o = new ParserBenchmark();
             //o.Init();
             //o.ParseSimple();

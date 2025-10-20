@@ -20,7 +20,7 @@ namespace ReOsuStoryboardPlayer.Core.Base
         public Dictionary<int, HashSet<TriggerCommand>> Triggers = new Dictionary<int, HashSet<TriggerCommand>>();
 
         //表示此时驱动更新物件的Update
-        public StoryboardUpdater CurrentUpdater { get; internal set; }
+        public IStoryboardUpdater CurrentUpdater { get; internal set; }
 
         public string ImageFilePath;
 
