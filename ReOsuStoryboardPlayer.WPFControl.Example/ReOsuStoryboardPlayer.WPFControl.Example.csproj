@@ -1,16 +1,17 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net5.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <OutputType>WinExe</OutputType>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <UseWPF>true</UseWPF>
   </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\ReOsuStoryboardPlayer.Core\ReOsuStoryboardPlayer.Core.csproj" />
     <ProjectReference Include="..\ReOsuStoryboardPlayer.WPFControl\ReOsuStoryboardPlayer.WPFControl.csproj" />
     <ProjectReference Include="..\ReOsuStoryboardPlayer\ReOsuStoryboardPlayer.csproj" />
   </ItemGroup>
+
   <ItemGroup>
-    <PackageReference Include="NAudio" Version="1.10.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 </Project>
